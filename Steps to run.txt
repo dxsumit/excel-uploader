@@ -1,0 +1,9 @@
+0. Download and Extract the zip file.
+1. Install all dependencies of both frontend and backend.
+   Run command "npm install" in same directory.
+   Above step has to be done for both frontend and backend.
+
+2. After successfull install, start the node backend server by running "npm run dev" in same backend directory.
+3. Similary start react front end by running "npm start" in frontend directory.
+4. For successfull testing make sure you have local mongodb database in your computer.
+
