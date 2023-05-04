@@ -6,7 +6,8 @@ const {MONGO_DB_URL} = process.env
 const connectToDB = async () => {
     return mongoose.connect(MONGO_DB_URL, {
         useNewUrlParser: true,
-        useUnifiedTopology: true
+        useUnifiedTopology: true,
+        // autoIndex: true
     })
     .then( () => {
         console.log("Connected to DataBase Successfully.");

@@ -2,6 +2,7 @@ const router = require("express").Router();
 const mongoose = require("mongoose");
 const async = require("async");
 require("dotenv").config();
+var uniqueValidator = require('mongoose-unique-validator');
 
 const multer  = require("multer")
 const xlsx = require("xlsx");
@@ -13,11 +14,9 @@ router.get('/', (req,res) => {
 });
 
 
-
 const dropDuplicates = async (myModel, columns) => {
     // find the duplicates...
-    const duplicates = await myModel.aggregate(
-        [
+    const duplicates = await myModel.aggregate([
         {
             $group: { 
                 _id: columns,           // fields on which duplication has been checked...
@@ -25,8 +24,10 @@ const dropDuplicates = async (myModel, columns) => {
                 count: { $sum: 1 }                  // count++ 
             },
         },
-        { $match: { count: { $gt: 1 }} },
-        ],
+        { 
+            $match: { count: { $gt: 1 }}
+        },
+    ],
         { allowDiskUse: true }
     );
 
@@ -37,10 +38,11 @@ const dropDuplicates = async (myModel, columns) => {
     }
 }
 
+
+
 // 'myFile' is the name from the frontend form...
 router.post('/excel', upload.single('myFile'), async (req,res) => {
 
-    try{
         const file = req.file;
         if (!file) {
             return res.status(200).json({status: "failed", msg: "Could not found file.."}); 
@@ -51,21 +53,22 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
         const sheetNameList = workbook.SheetNames;
         let randomCount; // for naming the model
 
-         // unique emails..
-         let emailList = {}
-         let columnsForDups = [];
-
-         // create schema for that sheet..
-         let schemaObject = {}
-         let emailExist = false
-         let emailFormat
-
-         let columnNames, rowData;
 
         for(let sheetName of sheetNameList){
-            columnNames = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 })[0];
-            rowData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+            let columnNames = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 })[0];
+            let rowData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
 
+            // fixing column name, suitable for schema and indexes...
+            columnNames = columnNames.map((each) => {
+                let newName = each.replaceAll(" ", "_");
+                newName = newName.replace(/\.$/, ""); 
+                return newName;
+            })
+
+            // create schema for that sheet..
+            let schemaObject = {}
+            let emailFormat = "";
+            let emailExist = false;
             for(let each of columnNames){
                 if(each.toLowerCase() === "email"){
                     emailExist = true;
@@ -86,9 +89,26 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
             // create schema.
             const excelSchema = new mongoose.Schema(schemaObject);
 
+            // create unique compound index on schema for duplication dropping..
+            let compoundIndexObject = {}
+            for(let each of columnNames){
+                // skipping the email because we already made sure emails are unique..
+                if(each !== emailFormat){
+                    compoundIndexObject[each] = 1;
+                }
+            }
+            // creating index
+            excelSchema.index(compoundIndexObject, { unique: true, dropDups: true });
+
+
             randomCount = Math.floor(Math.random()*1000);
             // use the unique identifier as the name of the table
             const Sheet = mongoose.model(`${sheetName}_${randomCount}`, excelSchema);
+            await Sheet.ensureIndexes();  // to update the newly created indexes. 
+
+            // unique emails..
+            let emailList = {}
+            let columnsForDups = [];
 
             // skipping the emails if already exist...
             if(emailExist){
@@ -103,92 +123,64 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
                 columnsForDups = columnsForDups.filter((each) => (each !== undefined) )
 
                 // synchronous call over items..
-                async.eachSeries(rowData, (row, callback) => {
+                async.eachSeries(rowData, async (row) => {
                     // if email already exists then skip...
                     if(!emailList[row[emailFormat]]){
                         emailList[row[emailFormat]] = 1;
                         // adding data to the collection
-                        const newData = new Sheet(row)
-                        newData.save();
+                        try{
+                            // converting into object
+                            let current_row = {}
+                            const values = Object.values(row);
+                            columnNames.forEach((key, i) => { current_row[key] = values[i] })
+
+                            const newData = new Sheet(current_row)
+                            await newData.save();
+                        }
+                        catch(err){
+                            console.log(`Found Dupliacte: ${err.message}`);
+                        }
                     }
-                    callback();
+                    
                 }, (error) => {
                     if (error)
-                        return res.status(200).json({status: "failed", msg: err}); ;
+                        return res.status(200).json({status: "failed while inserting", msg: err}); ;
                 });
 
             } else{
                 columnsForDups = [...columnNames];
                 columnsForDups = columnsForDups.map((each) => {
-                    each = each.replace(/\.$/, ""); 
                     return `$${each}`   
                 })
 
-                async.eachSeries(rowData, (row, callback) => {
+                async.eachSeries(rowData, async (row) => {
                     // adding data to the collection
-                    const newData = new Sheet(row)
-                    newData.save();
-                    callback();
+                    try{
+                        // converting into object
+                        let current_row = {}
+                        const values = Object.values(row);
+                        columnNames.forEach((key, i) => { current_row[key] = values[i] })
+
+                        const newData = new Sheet(current_row)
+                        await newData.save();
+                    }
+                    catch(err){
+                        console.log(`Found Dupliacte: ${err.message}`);
+                    }
                     
                 }, (error) => {
                     if (error)
-                        return res.status(200).json({status: "failed", msg: err}); ;
+                        return res.status(200).json({status: "failed while inserting", msg: err}); ;
                 });
             }
 
             ///////////////////////////////////////////////////////////////
-            dropDuplicates(Sheet, columnsForDups);
+            // dropDuplicates(Sheet, columnsForDups);
         }
 
         res.status(200).json({status: "success", msg: "Successfully added items to the database."}); 
-    }   
-    catch(err){
-        res.status(200).json({status: "failed", msg: err}); 
-    }
+
 });
-
-
-// // test duplicates 
-// router.get('/test', async (req,res) => {
-
-//     try{
-//         const currentSchema = { 
-//             Email: { type: String, trim: true, unique: true },
-//             Year: { type: String, trim: true },
-//             Phone: { type: String, trim: true }
-//         }
-//         const excelSchema = new mongoose.Schema(currentSchema);
-
-//         const Sheet = mongoose.model("contact", excelSchema);
-
-//         // find the duplicates...
-//         const duplicates = await Sheet.aggregate(
-//             [
-//               {
-//                 $group: { 
-//                     _id: ["$Year", "$Phone", "$some"],           // fields on which duplication has been checked...
-//                     duplicate: { $push: "$_id" },    // list of duplicates
-//                     count: { $sum: 1 }                  // count++ 
-//                 },
-//               },
-//               { $match: { count: { $gt: 1 }} },
-//             ],
-//             { allowDiskUse: true }
-//         );
-
-//         // dropping the duplicates...
-//         for(let each of duplicates){
-//             each.duplicate.shift();
-//             await Sheet.deleteMany({_id: {$in: each.duplicate} })
-//         }
-
-//         res.status(200).json({status: "success", msg: duplicates}); 
-//     }   
-//     catch(err){
-//         res.status(200).json({status: "failed", msg: err}); 
-//     }
-// });
-
 
 module.exports = router;
 
