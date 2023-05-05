@@ -2,41 +2,15 @@ const router = require("express").Router();
 const mongoose = require("mongoose");
 const async = require("async");
 require("dotenv").config();
-var uniqueValidator = require('mongoose-unique-validator');
-
 const multer  = require("multer")
 const xlsx = require("xlsx");
 const upload = multer({ dest: './public/data/uploads/'})
 
 
+// base URL 
 router.get('/', (req,res) => {
     res.status(200).json({status: "success", msg: "This uploader API"}); 
 });
-
-
-const dropDuplicates = async (myModel, columns) => {
-    // find the duplicates...
-    const duplicates = await myModel.aggregate([
-        {
-            $group: { 
-                _id: columns,           // fields on which duplication has been checked...
-                duplicate: { $push: "$_id" },    // list of duplicates
-                count: { $sum: 1 }                  // count++ 
-            },
-        },
-        { 
-            $match: { count: { $gt: 1 }}
-        },
-    ],
-        { allowDiskUse: true }
-    );
-
-    // dropping the duplicates...
-    for(let each of duplicates){
-        each.duplicate.shift();
-        await myModel.deleteMany({_id: {$in: each.duplicate} })
-    }
-}
 
 
 
@@ -51,9 +25,9 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
         // reading excel file..
         const workbook = xlsx.readFile(file.path);
         const sheetNameList = workbook.SheetNames;
-        let randomCount; // for naming the model
 
 
+        // There could be multiple sheet within excel file so loop over all of them.. 
         for(let sheetName of sheetNameList){
             let columnNames = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 })[0];
             let rowData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
@@ -89,6 +63,18 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
             // create schema.
             const excelSchema = new mongoose.Schema(schemaObject);
 
+
+            /*
+                To check duplicates in database before inserting, Unique Compound Indexes has been used.
+                Here all column names are considered as one compound index that's why any new data matching
+                them will be considered as duplicates..
+                This will happen before database insertion.
+
+                If email field exists in excel sheet it will be ignored in compound index because 
+                emails are unique which was already made sure by API code. 
+
+            */
+
             // create unique compound index on schema for duplication dropping..
             let compoundIndexObject = {}
             for(let each of columnNames){
@@ -97,33 +83,35 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
                     compoundIndexObject[each] = 1;
                 }
             }
-            // creating index
+
+            // creating compound index
             excelSchema.index(compoundIndexObject, { unique: true, dropDups: true });
 
 
+
+
+
+
+            let randomCount; // for unique model name..
             randomCount = Math.floor(Math.random()*1000);
+
             // use the unique identifier as the name of the table
             const Sheet = mongoose.model(`${sheetName}_${randomCount}`, excelSchema);
-            await Sheet.ensureIndexes();  // to update the newly created indexes. 
 
-            // unique emails..
-            let emailList = {}
-            let columnsForDups = [];
+
+            // to update the newly created indexes in database... 
+            await Sheet.ensureIndexes();  
+
 
             // skipping the emails if already exist...
             if(emailExist){
 
-                columnsForDups = [...columnNames];
-                columnsForDups = columnsForDups.map((each) => {
-                    if(each !== emailFormat)
-                        each = each.replace(/\.$/, ""); 
-                        return `$${each}`
-                })
-                // remove the undefined element..
-                columnsForDups = columnsForDups.filter((each) => (each !== undefined) )
-
                 // synchronous call over items..
                 async.eachSeries(rowData, async (row) => {
+
+                    // unique emails..
+                    let emailList = {}
+
                     // if email already exists then skip...
                     if(!emailList[row[emailFormat]]){
                         emailList[row[emailFormat]] = 1;
@@ -134,6 +122,7 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
                             const values = Object.values(row);
                             columnNames.forEach((key, i) => { current_row[key] = values[i] })
 
+                            // saving data..
                             const newData = new Sheet(current_row)
                             await newData.save();
                         }
@@ -147,12 +136,10 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
                         return res.status(200).json({status: "failed while inserting", msg: err}); ;
                 });
 
-            } else{
-                columnsForDups = [...columnNames];
-                columnsForDups = columnsForDups.map((each) => {
-                    return `$${each}`   
-                })
 
+
+            } else{
+               
                 async.eachSeries(rowData, async (row) => {
                     // adding data to the collection
                     try{
@@ -161,6 +148,7 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
                         const values = Object.values(row);
                         columnNames.forEach((key, i) => { current_row[key] = values[i] })
 
+                        // saving data..
                         const newData = new Sheet(current_row)
                         await newData.save();
                     }
@@ -174,8 +162,8 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
                 });
             }
 
-            ///////////////////////////////////////////////////////////////
-            // dropDuplicates(Sheet, columnsForDups);
+
+
         }
 
         res.status(200).json({status: "success", msg: "Successfully added items to the database."}); 
@@ -183,4 +171,5 @@ router.post('/excel', upload.single('myFile'), async (req,res) => {
 });
 
 module.exports = router;
+
 
